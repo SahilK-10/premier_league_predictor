@@ -1,177 +1,140 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+import xgboost as xgb
+from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_absolute_error
 import warnings
+
 warnings.filterwarnings('ignore')
 
-# Config
-WINDOW = 5
-LONG_WINDOW = 10
 SEASONS_CSV = [
     ('2223.csv', 2023),
     ('2324.csv', 2024),
     ('2425.csv', 2025),
     ('2526.csv', 2026),
 ]
-GW_TO_PREDICT = 4
+GW_TO_PREDICT = 5
 
-def load_and_format_csv(filename, season_end_year):
-    df = pd.read_csv(filename)
-    df = df.rename(columns={
-        'Date': 'date',
-        'HomeTeam': 'homeTeam',
-        'AwayTeam': 'awayTeam',
-        'FTHG': 'homeGoals',
-        'FTAG': 'awayGoals',
-        'Gameweek': 'gameweek'
-    })
-    df = df[['date', 'homeTeam', 'awayTeam', 'homeGoals', 'awayGoals', 'gameweek']].copy()
-    df['season'] = season_end_year
-    df['date'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
-    df['gameweek'] = pd.to_numeric(df['gameweek'], errors='coerce')
-    return df
-
-def prepare_data():
-    dfs = [load_and_format_csv(f, y) for f, y in SEASONS_CSV]
-    df = pd.concat(dfs, ignore_index=True)
-    df = df.dropna(subset=['gameweek'])
-    df['gameweek'] = df['gameweek'].astype(int)
-    return df
-
-def calculate_team_strength(df):
-    team_stats = {}
-    teams = pd.concat([df['homeTeam'], df['awayTeam']]).unique()
-    for team in teams:
-        home = df[df['homeTeam']==team]
-        away = df[df['awayTeam']==team]
-        team_stats[team] = {
-            'home_attack': home['homeGoals'].mean(),
-            'home_defense': home['awayGoals'].mean(),
-            'away_attack': away['awayGoals'].mean(),
-            'away_defense': away['homeGoals'].mean()
-        }
-    return team_stats
-
-def engineer_enhanced_features(df):
-    df['home_pts'] = (df.homeGoals>df.awayGoals).map({True:3,False:0}) + (df.homeGoals==df.awayGoals).astype(int)
-    df['away_pts'] = (df.awayGoals>df.homeGoals).map({True:3,False:0}) + (df.homeGoals==df.awayGoals).astype(int)
-    df = df.sort_values(['season','date']).reset_index(drop=True)
-
-    for w,label in [(WINDOW,'short'),(LONG_WINDOW,'long')]:
-        df[f'home_form_{label}'] = df.groupby('homeTeam')['home_pts'].rolling(w,min_periods=1).mean().reset_index(level=0,drop=True)
-        df[f'away_form_{label}'] = df.groupby('awayTeam')['away_pts'].rolling(w,min_periods=1).mean().reset_index(level=0,drop=True)
-
-    df['home_gf'] = df.groupby('homeTeam')['homeGoals'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-    df['home_ga'] = df.groupby('homeTeam')['awayGoals'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-    df['away_gf'] = df.groupby('awayTeam')['awayGoals'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-    df['away_ga'] = df.groupby('awayTeam')['homeGoals'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-
-    df['home_gd'] = df['homeGoals'] - df['awayGoals']
-    df['away_gd'] = df['awayGoals'] - df['homeGoals']
-    df['home_gd_form'] = df.groupby('homeTeam')['home_gd'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-    df['away_gd_form'] = df.groupby('awayTeam')['away_gd'].rolling(WINDOW,min_periods=1).mean().reset_index(level=0,drop=True)
-
-    team_stats = calculate_team_strength(df)
-    df['ha_strength'] = df['homeTeam'].map(lambda t: team_stats[t]['home_attack'])
-    df['hd_strength'] = df['homeTeam'].map(lambda t: team_stats[t]['home_defense'])
-    df['aa_strength'] = df['awayTeam'].map(lambda t: team_stats[t]['away_attack'])
-    df['ad_strength'] = df['awayTeam'].map(lambda t: team_stats[t]['away_defense'])
-
-    df = pd.get_dummies(df, columns=['homeTeam','awayTeam'], drop_first=False)
-    drop_cols = ['home_pts','away_pts','date','home_gd','away_gd']
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    return df, team_stats
-
-def split_train_test(df, gw_cutoff=GW_TO_PREDICT):
-    latest = df['season'].max()
-    train = df[~((df.season==latest)&(df.gameweek>=gw_cutoff))].copy()
-    test  = df[(df.season==latest)&(df.gameweek>=gw_cutoff)].copy()
-    if test.empty:
-        gw_cutoff=3
-        train = df[~((df.season==latest)&(df.gameweek>=gw_cutoff))].copy()
-        test  = df[(df.season==latest)&(df.gameweek>=gw_cutoff)].copy()
-    feat = [c for c in df.columns if c not in ['season','homeGoals','awayGoals','gameweek']]
-    Xtr, Yhtr, Yatr = train[feat], train['homeGoals'], train['awayGoals']
-    Xte = test[feat] if not test.empty else pd.DataFrame(columns=feat)
-    Yhte = test['homeGoals'] if not test.empty else pd.Series(dtype=int)
-    Yate = test['awayGoals'] if not test.empty else pd.Series(dtype=int)
-    return Xtr, Xte, Yhtr, Yatr, Yhte, Yate, feat
-
-def train_enhanced_model(Xtr, Ytr, Xte, Yte, label):
-    Xtr = Xtr.fillna(0)
-    Xte = Xte.fillna(0)
-    scaler = StandardScaler().fit(Xtr)
-    Xtr_s, Xte_s = scaler.transform(Xtr), scaler.transform(Xte)
-    models = [
-        GradientBoostingRegressor(n_estimators=150,max_depth=6,learning_rate=0.1,random_state=42),
-        RandomForestRegressor(n_estimators=150,max_depth=10,random_state=42)
-    ]
-    preds = []
-    for m in models:
-        m.fit(Xtr_s, Ytr)
-        if not Xte_s.size: continue
-        preds.append(m.predict(Xte_s))
-    if preds:
-        ens = np.mean(preds,axis=0)
-        print(f"{label} MAE:", mean_absolute_error(Yte,ens))
-    return models[0], scaler
-
-def create_input(fixtures, df, df_features, team_stats, feat_cols):
-    rows=[]
-    latest = df['season'].max()
-    latest_df = df_features[df_features['season']==latest]
-    for home, away in fixtures:
-        row = dict.fromkeys(feat_cols,0)
-        hdf = latest_df[latest_df[f'homeTeam_{home}']==1] if f'homeTeam_{home}' in latest_df else pd.DataFrame()
-        adf = latest_df[latest_df[f'awayTeam_{away}']==1] if f'awayTeam_{away}' in latest_df else pd.DataFrame()
-        for f in ['home_form_short','home_form_long','home_gf','home_ga','home_gd_form']:
-            row[f] = hdf[f].iloc[-1] if f in hdf and not hdf.empty else 0
-        for f in ['away_form_short','away_form_long','away_gf','away_ga','away_gd_form']:
-            row[f] = adf[f].iloc[-1] if f in adf and not adf.empty else 0
-        row['ha_strength']=team_stats[home]['home_attack'] if home in team_stats else 0
-        row['hd_strength']=team_stats[home]['home_defense'] if home in team_stats else 0
-        row['aa_strength']=team_stats[away]['away_attack'] if away in team_stats else 0
-        row['ad_strength']=team_stats[away]['away_defense'] if away in team_stats else 0
-        if f'homeTeam_{home}' in row: row[f'homeTeam_{home}']=1
-        if f'awayTeam_{away}' in row: row[f'awayTeam_{away}']=1
-        rows.append(row)
-    return pd.DataFrame(rows)[feat_cols]
-
-def main():
-    fixtures =[
-    ('Arsenal', 'Nottingham Forest'),
-    ('Bournemouth', 'Brighton'),
-    ('Crystal Palace', 'Sunderland'),
-    ('Everton', 'Aston Villa'),
-    ('Fulham', 'Leeds'),
-    ('Newcastle', 'Wolves'),
-    ('West Ham', 'Spurs'),
-    ('Brentford', 'Chelsea'),
-    ('Burnley', 'Liverpool'),
-    ('Man City', 'Man Utd'),
+GW5_FIXTURES = [
+    ('Liverpool', 'Everton'), ('Brighton', 'Tottenham'),
+    ('Burnley', 'Nottingham Forest'), ('West Ham', 'Crystal Palace'),
+    ('Wolves', 'Leeds'), ('Man Utd', 'Chelsea'),
+    ('Fulham', 'Brentford'), ('Bournemouth', 'Newcastle'),
+    ('Sunderland', 'Aston Villa'), ('Arsenal', 'Man City')
 ]
 
-    df = prepare_data()
-    df_feat, team_stats = engineer_enhanced_features(df)
-    df_feat['gameweek'], df_feat['season'] = df['gameweek'], df['season']
-    df_feat['homeGoals'], df_feat['awayGoals'] = df['homeGoals'], df['awayGoals']
-
-    Xtr,Xte,Yhtr,Yatr,Yhte,Yate,feat_cols = split_train_test(df_feat)
-    home_model,homescaler = train_enhanced_model(Xtr,Yhtr,Xte,Yhte,"Home Goals")
-    away_model,awayscaler = train_enhanced_model(Xtr,Yatr,Xte,Yate,"Away Goals")
-    Xpred = create_input(fixtures,df,df_feat,team_stats,feat_cols).fillna(0)
-
-    if not Xpred.empty:
-        hps = home_model.predict(homescaler.transform(Xpred))
-        aps = away_model.predict(homescaler.transform(Xpred))
-        hps,aps = np.clip(hps,0,5),np.clip(aps,0,5)
-        print("=== PREDICTIONS FOR GW4===")
-        for (h, a), hp, ap in zip(fixtures, hps, aps):
-            print(f"{h} {int(round(hp))} - {int(round(ap))} {a}")
+FEATURES_OF_INTEREST = [
+    'gameweek', 'HomeTeam', 'AwayTeam',
+    'FTHG', 'FTAG', 'HTHG', 'HTAG',
+    'HS', 'AS', 'HST', 'AST',
+    'HF', 'AF', 'HC', 'AC',
+    'HY', 'AY', 'HR', 'AR'
+]
 
 
+def load_data():
+    frames = []
+    for filename, season in SEASONS_CSV:
+        df = pd.read_csv(filename)
+        cols = [c for c in FEATURES_OF_INTEREST if c in df.columns]
+        df = df[cols]
+        df['season'] = season
+        frames.append(df)
+    df = pd.concat(frames, ignore_index=True)
+    df['gameweek'] = pd.to_numeric(
+        df['gameweek'], errors='coerce').dropna().astype(int)
+    stat_cols = ['HS', 'AS', 'HST', 'AST', 'HF',
+                 'AF', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR']
+    for c in stat_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    return df
 
-if __name__=="__main__":
+
+def prepare(df):
+    historical = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique().tolist()
+    future = [t for fixture in GW5_FIXTURES for t in fixture]
+    all_teams = list(set(historical + future))
+    le = LabelEncoder()
+    le.fit(all_teams)
+    df['Home_enc'] = le.transform(df['HomeTeam'])
+    df['Away_enc'] = le.transform(df['AwayTeam'])
+    feature_cols = [c for c in df.columns if c not in [
+        'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'season']]
+    df[feature_cols] = df[feature_cols].fillna(0)
+    return df, feature_cols, le
+
+
+def train(df, features):
+    latest = df['season'].max()
+    train = df[~((df.season == latest) & (df.gameweek >= GW_TO_PREDICT))]
+    test = df[(df.season == latest) & (df.gameweek >= GW_TO_PREDICT)]
+    Xtr = train[features]
+    yh = train['FTHG']
+    ya = train['FTAG']
+    models = {}
+    xh = xgb.XGBRegressor(n_estimators=200, max_depth=6,
+                          random_state=42, verbosity=0)
+    xa = xgb.XGBRegressor(n_estimators=200, max_depth=6,
+                          random_state=42, verbosity=0)
+    rf_h = RandomForestRegressor(
+        n_estimators=200, max_depth=10, random_state=42)
+    rf_a = RandomForestRegressor(
+        n_estimators=200, max_depth=10, random_state=42)
+    xh.fit(Xtr, yh)
+    xa.fit(Xtr, ya)
+    rf_h.fit(Xtr, yh)
+    rf_a.fit(Xtr, ya)
+    models['xh'] = xh
+    models['xa'] = xa
+    models['rfh'] = rf_h
+    models['rfa'] = rf_a
+    if not test.empty:
+        Xte = test[features]
+        yh_t = test['FTHG']
+        ya_t = test['FTAG']
+        ph = (xh.predict(Xte)+rf_h.predict(Xte))/2
+        pa = (xa.predict(Xte)+rf_a.predict(Xte))/2
+        print('MAE home:', mean_absolute_error(yh_t, ph))
+        print('MAE away:', mean_absolute_error(ya_t, pa))
+    return models
+
+
+def predict(models, df, features, le):
+    fixtures = GW5_FIXTURES
+    rows = []
+    latest = df['season'].max()
+    recent = df[df['season'] == latest]
+    for home, away in fixtures:
+        hr = recent[recent['HomeTeam'] == home].tail(3)
+        ar = recent[recent['AwayTeam'] == away].tail(3)
+        row = {'gameweek': GW_TO_PREDICT, 'Home_enc': le.transform(
+            [home])[0], 'Away_enc': le.transform([away])[0]}
+        for c in FEATURES_OF_INTEREST:
+            if c in ['HomeTeam', 'AwayTeam', 'gameweek']:
+                continue
+            if c in hr.columns:
+                row[c] = hr[c].mean()
+            elif c in ar.columns:
+                row[c] = ar[c].mean()
+        rows.append(row)
+    pf = pd.DataFrame(rows).fillna(0)
+    Xp = pf[features]
+    ph = (models['xh'].predict(Xp)+models['rfh'].predict(Xp))/2
+    pa = (models['xa'].predict(Xp)+models['rfa'].predict(Xp))/2
+    ph = np.clip(ph, 0, 5)
+    pa = np.clip(pa, 0, 5)
+    for (h, a), hpr, apr in zip(fixtures, ph, pa):
+        print(f"{h} {int(round(hpr))}-{int(round(apr))} {a}")
+
+
+def main():
+    df = load_data()
+    df, feature_cols, le = prepare(df)
+    models = train(df, feature_cols)
+    predict(models, df, feature_cols, le)
+
+
+if __name__ == '__main__':
     main()
