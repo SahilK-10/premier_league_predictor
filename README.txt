@@ -5,7 +5,7 @@ Key ML Components
 
 Features: Multi-window rolling averages of team form (short- and long-term), goal-scoring, conceding averages, goal difference, and team strength ratings derived from historical data.
 
-    Model: Ensemble of Gradient Boosting and Random Forest regressors.
+    Model: Ensemble of RandomForest and XGBoost.
 
     Preprocessing: One-hot encoding of teams, feature scaling, handling missing values.
 
@@ -13,11 +13,6 @@ Features: Multi-window rolling averages of team form (short- and long-term), goa
 
     Predictions: Output continuous expected goals, rounded to nearest integer for final score predictions.
 
-Results Summary for GW3
-
-    Exact score prediction accuracy: 10%
-
-    Correct result (win/draw/loss) accuracy: 60%
 
 
 Important Notes on Accuracy
