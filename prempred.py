@@ -14,15 +14,15 @@ SEASONS_CSV = [
     ('2425.csv', 2025),
     ('2526.csv', 2026),
 ]
-GW_TO_PREDICT = 8
+GW_TO_PREDICT = 9
 
 
-GW8_FIXTURES = [
-    ('Nottingham Forest', 'Chelsea'), ('Brighton', 'Newcastle'),
-    ('Burnley', 'Leeds'), ('Crystal Palace', 'Bournemouth'),
-    ('Man City', 'Everton'), ('Sunderland', 'Wolves'),
-    ('Fulham', 'Arsenal'), ('Tottenham', 'Aston Villa'),
-    ('Liverpool', 'Man Utd'), ('West Ham', 'Brentford')
+GW9_FIXTURES = [
+    ('Leeds', 'West Ham'), ('Chelsea', 'Sunderland'),
+    ('Newcastle', 'Fulham'), ('Man Utd', 'Brighton'),
+    ('Brentford', 'Liverpool'), ('Arsenal', 'Crystal Palace'),
+    ('Aston Villa', 'Man City'), ('Bournemouth', 'Nottingham Forest'),
+    ('Wolves', 'Burnley'), ('Everton', 'Tottenham')
 ]
 
 FEATURES_OF_INTEREST = [
@@ -55,7 +55,7 @@ def load_data():
 
 def prepare(df):
     historical = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique().tolist()
-    future = [t for fixture in GW8_FIXTURES for t in fixture]
+    future = [t for fixture in GW9_FIXTURES for t in fixture]
     all_teams = list(set(historical + future))
     le = LabelEncoder()
     le.fit(all_teams)
@@ -103,7 +103,7 @@ def train(df, features):
 
 
 def predict(models, df, features, le):
-    fixtures = GW8_FIXTURES
+    fixtures = GW9_FIXTURES
     rows = []
     latest = df['season'].max()
     recent = df[df['season'] == latest]
