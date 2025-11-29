@@ -18,9 +18,9 @@ GW_TO_PREDICT = 13
 
 
 GW13_FIXTURES = [
-    ('Brentford', 'Burnley'), ('Man City', 'Leds'),
+    ('Brentford', 'Burnley'), ('Man City', 'Leeds'),
     ('Sunderland', 'Bournemouth'), ('Everton', 'Newcastle'),
-    ('Spurs', 'Fulham'), ('Crystal Palace', 'Man Utd'),
+    ('Tottenham', 'Fulham'), ('Crystal Palace', 'Man Utd'),
     ('Aston Villa', 'Wolves'), ('Nottingham Forest', 'Brighton'),
     ('West Ham', 'Liverpool'), ('Chelsea', 'Arsenal')
 ]
